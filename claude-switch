@@ -167,6 +167,8 @@ show_status() {
 
 do_setup() {
     local alias_name
+    local -a pending_names=()
+    local -a pending_creds=()
 
     echo ""
     echo -e "  ${BOLD}claude-switch${NC} ${DIM}setup${NC}"
@@ -190,115 +192,144 @@ do_setup() {
 
     read -r alias_input
     alias_name="${alias_input:-${current_alias:-c}}"
-    set_config "alias" "$alias_name"
 
     echo ""
-    echo -e "     ${GREEN}✓${NC} Shortcut set to ${BOLD}${alias_name}${NC}"
+    echo -e "     ${GREEN}✓${NC} ${BOLD}${alias_name}${NC}"
     echo ""
 
     # ── Step 2: Add accounts ────────────────────────────────────────────────
     echo -e "  ${CYAN}2${NC}  ${BOLD}Add your accounts${NC}"
     echo ""
 
-    # Check if claude is logged in
     local auth_status
     auth_status=$(claude auth status 2>/dev/null) || auth_status=""
 
-    if echo "$auth_status" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('loggedIn') else 1)" 2>/dev/null; then
-        local current_email current_sub
-        current_email=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('email','?'))" 2>/dev/null)
-        current_sub=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('subscriptionType','?'))" 2>/dev/null)
-
-        echo -e "     You're logged in as ${BOLD}${current_email}${NC} ${DIM}(${current_sub})${NC}"
-        echo ""
-        printf "     Name for this account: ${BOLD}"
-        read -r profile_name
-        printf "${NC}"
-
-        if [ -n "$profile_name" ]; then
-            local creds
-            creds=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || {
-                echo -e "     ${RED}✗${NC} Could not read credentials from Keychain"
-                echo ""
-                return 1
-            }
-            security add-generic-password -U -s "${PROFILE_PREFIX}${profile_name}" -a "$KEYCHAIN_ACCOUNT" -w "$creds" 2>/dev/null || \
-            security add-generic-password    -s "${PROFILE_PREFIX}${profile_name}" -a "$KEYCHAIN_ACCOUNT" -w "$creds"
-            echo "$profile_name" > "$ACTIVE_FILE"
-            echo -e "     ${GREEN}✓${NC} Saved as ${BOLD}${profile_name}${NC}"
-            echo ""
-
-            # Loop for more accounts
-            while true; do
-                printf "     Add another account? ${DIM}(y/n)${NC} "
-                read -r add_more
-                echo ""
-                case "$add_more" in
-                    y|Y|yes)
-                        echo -e "     ${DIM}Log into your other account:${NC}"
-                        echo -e "     ${BOLD}claude auth logout && claude auth login${NC}"
-                        echo ""
-                        printf "     Press ${BOLD}enter${NC} when you're logged in..."
-                        read -r
-                        echo ""
-
-                        # Verify they logged in
-                        auth_status=$(claude auth status 2>/dev/null) || auth_status=""
-                        if echo "$auth_status" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('loggedIn') else 1)" 2>/dev/null; then
-                            current_email=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('email','?'))" 2>/dev/null)
-                            current_sub=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('subscriptionType','?'))" 2>/dev/null)
-
-                            echo -e "     Logged in as ${BOLD}${current_email}${NC} ${DIM}(${current_sub})${NC}"
-                            printf "     Name for this account: ${BOLD}"
-                            read -r next_name
-                            printf "${NC}"
-
-                            if [ -n "$next_name" ]; then
-                                creds=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || continue
-                                security add-generic-password -U -s "${PROFILE_PREFIX}${next_name}" -a "$KEYCHAIN_ACCOUNT" -w "$creds" 2>/dev/null || \
-                                security add-generic-password    -s "${PROFILE_PREFIX}${next_name}" -a "$KEYCHAIN_ACCOUNT" -w "$creds"
-                                echo "$next_name" > "$ACTIVE_FILE"
-                                echo -e "     ${GREEN}✓${NC} Saved as ${BOLD}${next_name}${NC}"
-                                echo ""
-                            fi
-                        else
-                            echo -e "     ${YELLOW}!${NC} Not logged in — skipping. You can add it later with:"
-                            echo -e "       ${BOLD}claude-switch save <name>${NC}"
-                            echo ""
-                        fi
-                        ;;
-                    *)
-                        break
-                        ;;
-                esac
-            done
-        fi
-    else
+    if ! echo "$auth_status" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('loggedIn') else 1)" 2>/dev/null; then
         echo -e "     ${YELLOW}!${NC} Not logged into Claude Code."
         echo -e "     Run ${BOLD}claude auth login${NC} first, then ${BOLD}claude-switch setup${NC} again."
         echo ""
         return 1
     fi
 
-    # ── Step 3: Summary ─────────────────────────────────────────────────────
-    echo -e "  ${CYAN}3${NC}  ${BOLD}You're all set!${NC}"
+    local current_email current_sub creds
+
+    # First account (already logged in)
+    current_email=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('email','?'))" 2>/dev/null)
+    current_sub=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('subscriptionType','?'))" 2>/dev/null)
+
+    echo -e "     You're logged in as ${BOLD}${current_email}${NC} ${DIM}(${current_sub})${NC}"
+    echo ""
+    printf "     Name for this account: ${BOLD}"
+    read -r profile_name
+    printf "${NC}"
+
+    if [ -z "$profile_name" ]; then
+        echo -e "     ${DIM}Skipped.${NC}"
+        echo ""
+    else
+        creds=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || {
+            echo -e "     ${RED}✗${NC} Could not read credentials from Keychain"
+            echo ""
+            return 1
+        }
+        pending_names+=("$profile_name")
+        pending_creds+=("$creds")
+        echo -e "     ${GREEN}✓${NC} ${BOLD}${profile_name}${NC} ${DIM}(${current_email})${NC}"
+        echo ""
+
+        # Loop for more accounts
+        while true; do
+            printf "     Add another account? ${DIM}(y/n)${NC} "
+            read -r add_more
+            echo ""
+            case "$add_more" in
+                y|Y|yes)
+                    echo -e "     ${DIM}Log into your other account:${NC}"
+                    echo -e "     ${BOLD}claude auth logout && claude auth login${NC}"
+                    echo ""
+                    printf "     Press ${BOLD}enter${NC} when you're logged in..."
+                    read -r
+                    echo ""
+
+                    auth_status=$(claude auth status 2>/dev/null) || auth_status=""
+                    if echo "$auth_status" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d.get('loggedIn') else 1)" 2>/dev/null; then
+                        current_email=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('email','?'))" 2>/dev/null)
+                        current_sub=$(echo "$auth_status" | python3 -c "import sys,json; print(json.load(sys.stdin).get('subscriptionType','?'))" 2>/dev/null)
+
+                        echo -e "     Logged in as ${BOLD}${current_email}${NC} ${DIM}(${current_sub})${NC}"
+                        printf "     Name for this account: ${BOLD}"
+                        read -r next_name
+                        printf "${NC}"
+
+                        if [ -n "$next_name" ]; then
+                            creds=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || {
+                                echo -e "     ${RED}✗${NC} Could not read credentials"
+                                echo ""
+                                continue
+                            }
+                            pending_names+=("$next_name")
+                            pending_creds+=("$creds")
+                            echo -e "     ${GREEN}✓${NC} ${BOLD}${next_name}${NC} ${DIM}(${current_email})${NC}"
+                            echo ""
+                        fi
+                    else
+                        echo -e "     ${YELLOW}!${NC} Not logged in — skipping. You can add it later with:"
+                        echo -e "       ${BOLD}claude-switch save <name>${NC}"
+                        echo ""
+                    fi
+                    ;;
+                *)
+                    break
+                    ;;
+            esac
+        done
+    fi
+
+    # ── Step 3: Apply everything ────────────────────────────────────────────
+    echo -e "  ${CYAN}3${NC}  ${BOLD}Saving...${NC}"
+    echo ""
+
+    # Write config
+    set_config "alias" "$alias_name"
+
+    # Write all profiles to keychain
+    local last_name=""
+    for i in "${!pending_names[@]}"; do
+        local name="${pending_names[$i]}"
+        local cred="${pending_creds[$i]}"
+        security add-generic-password -U -s "${PROFILE_PREFIX}${name}" -a "$KEYCHAIN_ACCOUNT" -w "$cred" 2>/dev/null || \
+        security add-generic-password    -s "${PROFILE_PREFIX}${name}" -a "$KEYCHAIN_ACCOUNT" -w "$cred"
+        last_name="$name"
+        echo -e "     ${GREEN}✓${NC} Saved ${BOLD}${name}${NC} to Keychain"
+    done
+
+    # Set the last added profile as active
+    if [ -n "$last_name" ]; then
+        echo "$last_name" > "$ACTIVE_FILE"
+    fi
+
+    echo -e "     ${GREEN}✓${NC} Shortcut set to ${BOLD}${alias_name}${NC}"
+    echo ""
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 
     local profiles
     profiles=$(list_profiles)
     if [ -n "$profiles" ]; then
-        echo -e "     ${DIM}Your commands:${NC}"
+        echo -e "  ${GREEN}Done!${NC} Your commands:"
         echo ""
         while IFS= read -r p; do
             [[ -z "$p" ]] && continue
-            echo -e "       ${BOLD}${alias_name} ${p}${NC}${DIM}       switch + launch${NC}"
+            echo -e "    ${BOLD}${alias_name} ${p}${NC}${DIM}       switch + launch${NC}"
         done <<< "$profiles"
-        echo -e "       ${BOLD}${alias_name} status${NC}${DIM}     show all profiles${NC}"
-        echo -e "       ${BOLD}${alias_name}${NC}${DIM}            launch with current profile${NC}"
+        echo -e "    ${BOLD}${alias_name} status${NC}${DIM}     show all profiles${NC}"
+        echo -e "    ${BOLD}${alias_name}${NC}${DIM}            launch with current profile${NC}"
     fi
 
     echo ""
-    echo -e "     Restart your shell or run: ${BOLD}source ~/.zshrc${NC}"
+    echo -e "  Restart your shell or run: ${BOLD}source ~/.zshrc${NC}"
     echo ""
 }
 

@@ -1,8 +1,8 @@
 # claude-switch
 
-Fast profile switcher for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on macOS. Zero dependencies, pure bash, credentials stored in macOS Keychain.
+Switching between Claude Code accounts sucks. You have to log out, log back in, wait, do it again when you want to switch back. If you have a work account and a personal account, you know the pain.
 
-Switch between Claude accounts in under a second — no logout/login cycles.
+This fixes that. One command to switch, instant, done.
 
 ```
 $ c status
@@ -16,25 +16,17 @@ $ c work
 ● Switched to work
 ```
 
-## How it works
-
-Claude Code stores OAuth credentials in the macOS Keychain under `Claude Code-credentials`. This tool saves copies of those credentials under profile-specific entries (`Claude Code-credentials-work`, etc.) and swaps them when you switch.
-
-On switch it:
-1. Auto-saves the current profile's (possibly refreshed) credentials
-2. Loads the target profile's credentials into the main slot
-3. Refreshes expired tokens automatically via `claude auth status`
-4. Tracks the active profile in `~/.claude/.active-profile`
+Pure bash, zero dependencies, credentials stored securely in macOS Keychain.
 
 ## Install
 
-### Homebrew (recommended)
+### Homebrew
 
 ```bash
 brew install Mamdouh66/tap/claude-switch
 ```
 
-Then add this to your `~/.zshrc`:
+Then add to your `~/.zshrc`:
 
 ```bash
 source $(brew --prefix)/share/claude-switch.zsh
@@ -56,54 +48,46 @@ cd claude-switch
 
 ## Setup
 
-The installer runs a guided setup automatically on first install. You can also run it anytime:
+First install runs a guided setup automatically. You can also run it anytime with `claude-switch setup`.
+
+It asks you to:
+1. Pick a shortcut — `c`, `cc`, `code`, whatever you want
+2. Name your accounts — call them anything, not limited to "work" and "personal"
+3. Add as many accounts as you need
+
+Or do it manually:
 
 ```bash
-claude-switch setup
-```
-
-It walks you through:
-1. **Choosing your shortcut** — `c`, `cc`, `code`, or whatever you like
-2. **Naming your accounts** — any names you want, not just work/personal
-3. **Adding multiple accounts** — save as many as you need
-
-Or set up manually:
-
-```bash
-# Save your current login as a profile
+# You're logged into your first account
 claude-switch save work
 
-# Log into another account, then save it too
+# Log into the other one
 claude auth logout && claude auth login
 claude-switch save personal
 ```
 
 ## Usage
 
-### Shell shortcut (recommended)
-
-The install adds a shortcut function to your shell (default: `c`, configurable):
-
 ```bash
 c work              # switch to work + launch claude
-c personal          # switch to personal + launch claude  
+c personal          # switch to personal + launch claude
 c status            # show all profiles and token health
 c refresh           # refresh active profile's token
 c                   # launch claude with current profile
-c -p "hello"        # pass any flags through to claude
+c -p "hello"        # any flags pass through to claude
 ```
 
-Change the shortcut anytime:
+The shortcut name is configurable:
 
 ```bash
-claude-switch alias cc     # now it's `cc work`, `cc status`, etc.
+claude-switch alias cc    # now it's `cc work`, `cc status`, etc.
 ```
 
-### Direct commands
+All commands also work directly:
 
 ```bash
 claude-switch <profile>         # switch to a profile
-claude-switch status            # show all profiles and token health
+claude-switch status            # show profiles and token health
 claude-switch setup             # guided setup wizard
 claude-switch save <name>       # save current credentials as a profile
 claude-switch list              # list profile names
@@ -114,29 +98,21 @@ claude-switch alias [name]      # show or change shell shortcut
 
 ## Token refresh
 
-OAuth tokens expire after ~8 hours. claude-switch handles this automatically:
+Claude Code uses OAuth tokens that expire after about 8 hours. Here's how claude-switch deals with that:
 
-- **On switch away**: saves the current (possibly refreshed) credentials before loading the new profile
-- **On switch to**: if the target token is expired, runs `claude auth status` to trigger a refresh and saves the result
-- **Manual**: `claude-switch refresh` refreshes the active profile on demand
+- **When you switch away** from a profile, it saves the current credentials (which Claude may have silently refreshed during your session) back to that profile's Keychain entry.
+- **When you switch to** a profile with an expired token, it automatically triggers a refresh and saves the new token.
+- **`claude-switch refresh`** lets you manually refresh the active profile whenever you want.
 
-Tokens stay fresh as long as you use your profiles regularly. If a profile sits unused for a long time, the refresh token will handle it on next switch.
+This keeps things working smoothly as long as you switch between profiles regularly.
+
+> **Important**: There's a separate **refresh token** that Claude Code uses behind the scenes to get new access tokens. This refresh token lasts much longer (weeks/months), but if you don't use a profile for a very long time and the refresh token expires, you'll need to log in again with `claude auth login` and re-save the profile with `claude-switch save <name>`. In normal use this shouldn't happen.
 
 ## Requirements
 
 - macOS (uses Keychain for secure credential storage)
 - Claude Code CLI installed and authenticated
 - bash or zsh
-
-## How is this different from claude-swap?
-
-[claude-swap](https://github.com/realiti4/claude-swap) is a Python package that does the same thing. This project is:
-
-- **Zero dependencies** — pure bash, no Python runtime needed
-- **Faster** — no interpreter startup, instant switch
-- **Proactive token refresh** — automatically refreshes expired tokens on switch
-- **Shell-native** — configurable shortcut with tab completion
-- **Guided setup** — interactive wizard, not just docs
 
 ## License
 

@@ -14,17 +14,13 @@ class ClaudeSwitch < Formula
 
   def caveats
     <<~EOS
-      Add this to your ~/.zshrc to enable the `c` shortcut:
+      Add this to your ~/.zshrc:
 
         source #{share}/claude-switch.zsh
 
-      Then restart your shell or run: source ~/.zshrc
+      Then run:
 
-      Quick start:
-        claude-switch save work       # save current login
-        claude-switch save personal   # save another login
-        c work                        # switch + launch
-        c status                      # show profiles
+        claude-switch setup
     EOS
   end
 

@@ -104,12 +104,9 @@ Claude Code uses OAuth tokens that expire after about 8 hours. Here's how claude
 - **When you switch to** a profile with an expired token, it automatically triggers a refresh and saves the new token.
 - **`claude-switch refresh`** lets you manually refresh the active profile whenever you want.
 
-This keeps things working smoothly as long as you switch between profiles regularly. If you don't use a profile for a very long time and it stops working, just log in again and re-save it:
+This keeps things working smoothly as long as you switch between profiles regularly.
 
-```bash
-claude auth login
-claude-switch save <name>
-```
+> **Important**: There's a separate **refresh token** that Claude Code uses behind the scenes to get new access tokens. This refresh token lasts much longer (weeks/months), but if you don't use a profile for a very long time and the refresh token expires, you'll need to log in again with `claude auth login` and re-save the profile with `claude-switch save <name>`. In normal use this shouldn't happen.
 
 ## Requirements
 

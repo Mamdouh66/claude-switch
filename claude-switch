@@ -1,0 +1,227 @@
+#!/bin/bash
+# claude-switch — fast profile switcher for Claude Code on macOS
+# Swaps OAuth credentials in the macOS Keychain between named profiles.
+#
+# Usage:
+#   claude-switch <profile>        Switch to a profile (e.g. work, personal)
+#   claude-switch status           Show active profile + token health for all profiles
+#   claude-switch save <profile>   Save current credentials as a named profile
+#   claude-switch list             List all saved profiles
+#   claude-switch remove <profile> Remove a saved profile
+#   claude-switch refresh          Refresh the active profile's token now
+
+set -e
+
+KEYCHAIN_SERVICE="Claude Code-credentials"
+KEYCHAIN_ACCOUNT="$(whoami)"
+ACTIVE_FILE="$HOME/.claude/.active-profile"
+PROFILE_PREFIX="Claude Code-credentials-"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+get_active_profile() {
+    cat "$ACTIVE_FILE" 2>/dev/null || echo ""
+}
+
+# Parse token expiry from a keychain entry's JSON
+get_token_info() {
+    local service="$1"
+    local creds
+    creds=$(security find-generic-password -s "$service" -w 2>/dev/null) || return 1
+    echo "$creds" | python3 -c "
+import sys, json, time
+from datetime import datetime
+d = json.load(sys.stdin)
+oauth = d.get('claudeAiOauth', {})
+exp = oauth.get('expiresAt', 0)
+sub = oauth.get('subscriptionType', '?')
+tier = oauth.get('rateLimitTier', '?')
+now = time.time() * 1000
+remaining = (exp - now) / 1000 / 60
+if remaining > 0:
+    if remaining > 60:
+        time_str = f'{remaining/60:.1f}h left'
+    else:
+        time_str = f'{remaining:.0f}m left'
+    status = 'valid'
+else:
+    time_str = 'expired'
+    status = 'expired'
+print(f'{status}|{sub}|{tier}|{time_str}')
+" 2>/dev/null
+}
+
+# List all profile names from keychain
+list_profiles() {
+    security dump-keychain 2>/dev/null | grep '"svce"' | grep "Claude Code-credentials-" | \
+        sed 's/.*"Claude Code-credentials-//' | sed 's/".*//' | sort -u
+}
+
+do_refresh() {
+    local profile="$1"
+    # claude auth status triggers a token refresh if expired
+    claude auth status >/dev/null 2>&1 || true
+    # Save refreshed credentials back to the profile entry
+    local creds
+    creds=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || return 1
+    security add-generic-password -U -s "${PROFILE_PREFIX}${profile}" -a "$KEYCHAIN_ACCOUNT" -w "$creds" 2>/dev/null
+}
+
+show_status() {
+    local active
+    active=$(get_active_profile)
+    echo ""
+
+    local profiles
+    profiles=$(list_profiles)
+    if [ -z "$profiles" ]; then
+        echo -e "  ${DIM}No profiles saved. Run: claude-switch save <name>${NC}"
+        echo ""
+        return
+    fi
+
+    while IFS= read -r profile; do
+        [[ -z "$profile" ]] && continue
+        local info marker color
+        info=$(get_token_info "${PROFILE_PREFIX}${profile}" 2>/dev/null) || info="error|?|?|unavailable"
+
+        IFS='|' read -r status sub tier time_str <<< "$info"
+
+        if [ "$profile" = "$active" ]; then
+            marker="${GREEN}●${NC}"
+        else
+            marker="${DIM}○${NC}"
+        fi
+
+        case "$status" in
+            valid)   color="${GREEN}" ;;
+            expired) color="${RED}" ;;
+            *)       color="${YELLOW}" ;;
+        esac
+
+        printf "  %b  ${BOLD}%-12s${NC} ${DIM}%-6s${NC}  %b%s${NC}\n" \
+            "$marker" "$profile" "$sub" "$color" "$time_str"
+    done <<< "$profiles"
+    echo ""
+}
+
+usage() {
+    echo "Usage: claude-switch <command> [args]"
+    echo ""
+    echo "  <profile>        Switch to a profile (e.g. work, personal)"
+    echo "  status           Show all profiles and token health"
+    echo "  save <profile>   Save current credentials as a profile"
+    echo "  list             List profile names"
+    echo "  remove <profile> Remove a saved profile"
+    echo "  refresh          Refresh the active profile's token"
+    exit 1
+}
+
+CMD="${1:-}"
+
+case "$CMD" in
+    status|"")
+        show_status
+        ;;
+
+    save)
+        SAVE_AS="${2:-}"
+        if [ -z "$SAVE_AS" ]; then
+            echo "Usage: claude-switch save <profile-name>"
+            exit 1
+        fi
+
+        CREDS=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || {
+            echo -e "${RED}Error: No active Claude Code credentials. Log in first.${NC}"
+            exit 1
+        }
+
+        security add-generic-password -U -s "${PROFILE_PREFIX}${SAVE_AS}" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS" 2>/dev/null || \
+        security add-generic-password    -s "${PROFILE_PREFIX}${SAVE_AS}" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS"
+        echo "$SAVE_AS" > "$ACTIVE_FILE"
+        echo -e "${GREEN}Saved current credentials as '${SAVE_AS}'.${NC}"
+        ;;
+
+    list)
+        list_profiles
+        ;;
+
+    remove)
+        PROFILE="${2:-}"
+        if [ -z "$PROFILE" ]; then
+            echo "Usage: claude-switch remove <profile-name>"
+            exit 1
+        fi
+        security delete-generic-password -s "${PROFILE_PREFIX}${PROFILE}" -a "$KEYCHAIN_ACCOUNT" 2>/dev/null && \
+            echo -e "${GREEN}Removed profile '${PROFILE}'.${NC}" || \
+            echo -e "${RED}Profile '${PROFILE}' not found.${NC}"
+        ;;
+
+    refresh)
+        ACTIVE=$(get_active_profile)
+        if [ -z "$ACTIVE" ]; then
+            echo -e "${RED}No active profile.${NC}"
+            exit 1
+        fi
+        echo -e "${DIM}Refreshing ${ACTIVE}...${NC}"
+        do_refresh "$ACTIVE"
+        echo -e "${GREEN}Token refreshed for '${ACTIVE}'.${NC}"
+        show_status
+        ;;
+
+    -h|--help|help)
+        usage
+        ;;
+
+    *)
+        # Treat as profile name to switch to
+        PROFILE="$CMD"
+        SOURCE="${PROFILE_PREFIX}${PROFILE}"
+
+        # Check if profile exists
+        if ! security find-generic-password -s "$SOURCE" -w >/dev/null 2>&1; then
+            echo -e "${RED}No saved credentials for '${PROFILE}'.${NC}"
+            echo -e "${DIM}Available profiles:${NC}"
+            list_profiles | sed 's/^/  /'
+            echo -e "${DIM}Or save current: claude-switch save ${PROFILE}${NC}"
+            exit 1
+        fi
+
+        # Auto-save current (possibly refreshed) credentials before switching away
+        ACTIVE=$(get_active_profile)
+        if [ -n "$ACTIVE" ] && [ "$ACTIVE" != "$PROFILE" ]; then
+            CURRENT_CREDS=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || true
+            if [ -n "$CURRENT_CREDS" ]; then
+                security add-generic-password -U -s "${PROFILE_PREFIX}${ACTIVE}" -a "$KEYCHAIN_ACCOUNT" -w "$CURRENT_CREDS" 2>/dev/null || true
+            fi
+        fi
+
+        # Load the target profile credentials
+        CREDS=$(security find-generic-password -s "$SOURCE" -w)
+
+        # Update the main credentials entry
+        security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS" 2>/dev/null || \
+        security add-generic-password    -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS"
+
+        # Track which profile is now active
+        echo "$PROFILE" > "$ACTIVE_FILE"
+
+        # Proactively refresh token if expired
+        local_info=$(get_token_info "$KEYCHAIN_SERVICE" 2>/dev/null) || local_info=""
+        local_status=$(echo "$local_info" | cut -d'|' -f1)
+        if [ "$local_status" = "expired" ]; then
+            echo -e "${DIM}Token expired, refreshing...${NC}"
+            do_refresh "$PROFILE"
+        fi
+
+        echo -e "${GREEN}●${NC} Switched to ${BOLD}${PROFILE}${NC}"
+        ;;
+esac

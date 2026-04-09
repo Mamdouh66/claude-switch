@@ -170,6 +170,8 @@ do_setup() {
     local -a pending_names=()
     local -a pending_creds=()
 
+    trap 'printf "${NC}\n\n  ${DIM}Setup cancelled. Nothing was saved.${NC}\n\n"; return 1' INT
+
     echo ""
     echo -e "  ${BOLD}claude-switch${NC} ${DIM}setup${NC}"
     echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -331,6 +333,8 @@ do_setup() {
     echo ""
     echo -e "  Restart your shell or run: ${BOLD}source ~/.zshrc${NC}"
     echo ""
+
+    trap - INT
 }
 
 usage() {

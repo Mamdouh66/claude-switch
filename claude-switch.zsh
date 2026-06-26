@@ -18,13 +18,24 @@ _claude_switch_register() {
 ${alias_name}() {
     local cmd=\"\$1\"
     case \"\$cmd\" in
-        status|refresh|setup)
-            claude-switch \"\$cmd\"
+        status|refresh|setup|mode|list|alias|remove|save)
+            claude-switch \"\$@\"
             ;;
         *)
             # Check if it's a saved profile name
             if [ -n \"\$cmd\" ] && claude-switch list 2>/dev/null | grep -qx \"\$cmd\"; then
-                claude-switch \"\$cmd\" && command claude --dangerously-skip-permissions \"\${@:2}\"
+                if [ \"\$(claude-switch _mode 2>/dev/null)\" = \"isolated\" ]; then
+                    # Isolated mode: point this shell's CLAUDE_CONFIG_DIR at the
+                    # profile's dir, then launch. First use triggers /login.
+                    local _dir
+                    _dir=\"\$(claude-switch _dirfor \"\$cmd\" 2>/dev/null)\"
+                    if [ -n \"\$_dir\" ]; then
+                        export CLAUDE_CONFIG_DIR=\"\$_dir\"
+                        command claude --dangerously-skip-permissions \"\${@:2}\"
+                    fi
+                else
+                    claude-switch \"\$cmd\" && command claude --dangerously-skip-permissions \"\${@:2}\"
+                fi
             else
                 command claude --dangerously-skip-permissions \"\$@\"
             fi
@@ -37,7 +48,7 @@ ${alias_name}() {
     if [[ -n "$ZSH_VERSION" ]]; then
         eval "
 _${alias_name}_completions() {
-    local commands=(status refresh setup)
+    local commands=(status refresh setup mode)
     local profiles=(\$(claude-switch list 2>/dev/null))
     compadd -- \"\${commands[@]}\" \"\${profiles[@]}\"
 }

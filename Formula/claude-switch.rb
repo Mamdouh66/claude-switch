@@ -25,6 +25,6 @@ class ClaudeSwitch < Formula
   end
 
   test do
-    assert_match "Usage:", shell_output("#{bin}/claude-switch --help", 1)
+    assert_match "Usage:", shell_output("#{bin}/claude-switch --help")
   end
 end

@@ -4,12 +4,16 @@
 
 set -e
 
+VERSION="0.2.0"
 KEYCHAIN_SERVICE="Claude Code-credentials"
 KEYCHAIN_ACCOUNT="$(whoami)"
 ACTIVE_FILE="$HOME/.claude/.active-profile"
 PROFILE_PREFIX="Claude Code-credentials-"
 CONFIG_DIR="$HOME/.config/claude-switch"
 CONFIG_FILE="$CONFIG_DIR/config"
+# Isolated mode: each profile is its own CLAUDE_CONFIG_DIR (separate login,
+# own refresh token, can run concurrently). See `claude-switch mode`.
+ISOLATED_DIR="$CONFIG_DIR/profiles"
 
 # ── Colors ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +59,42 @@ get_active_profile() {
     cat "$ACTIVE_FILE" 2>/dev/null || echo ""
 }
 
+set_active_profile() {
+    mkdir -p "$(dirname "$ACTIVE_FILE")"
+    echo "$1" > "$ACTIVE_FILE"
+}
+
+# keychain (default) | isolated
+get_mode() {
+    get_config "mode" "keychain"
+}
+
+profile_dir() {
+    echo "${ISOLATED_DIR}/$1"
+}
+
+isolated_profiles() {
+    [ -d "$ISOLATED_DIR" ] || return 0
+    find "$ISOLATED_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+        | sed 's#.*/##' | sort -u
+}
+
+# status|sub|email for an isolated profile by running auth status in its dir
+isolated_info() {
+    local dir="$1"
+    CLAUDE_CONFIG_DIR="$dir" claude auth status 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('error||'); sys.exit(0)
+if d.get('loggedIn'):
+    print(f\"ready|{d.get('subscriptionType','?')}|{d.get('email','')}\")
+else:
+    print('logged-out||')
+" 2>/dev/null || echo "error||"
+}
+
 get_token_info() {
     local service="$1"
     local creds
@@ -66,17 +106,25 @@ oauth = d.get('claudeAiOauth', {})
 exp = oauth.get('expiresAt', 0)
 sub = oauth.get('subscriptionType', '?')
 email = oauth.get('email', '')
+has_refresh = bool(oauth.get('refreshToken'))
 now = time.time() * 1000
 remaining = (exp - now) / 1000 / 60
 if remaining > 0:
+    # Access token still fresh.
     if remaining > 60:
         time_str = f'{remaining/60:.1f}h left'
     else:
         time_str = f'{remaining:.0f}m left'
     status = 'valid'
+elif has_refresh:
+    # Access token lapsed, but the long-lived refresh token will mint a
+    # new one on next use. The account is healthy, not expired.
+    status = 'ready'
+    time_str = 'auto-refresh'
 else:
-    time_str = 'expired'
+    # No refresh token: this profile is genuinely dead and needs re-auth.
     status = 'expired'
+    time_str = 'expired'
 print(f'{status}|{sub}|{time_str}|{email}')
 " 2>/dev/null
 }
@@ -92,6 +140,10 @@ print(d.get('email', 'unknown'))
 }
 
 list_profiles() {
+    if [ "$(get_mode)" = "isolated" ]; then
+        isolated_profiles
+        return
+    fi
     security dump-keychain 2>/dev/null | grep '"svce"' | grep "Claude Code-credentials-" | \
         sed 's/.*"Claude Code-credentials-//' | sed 's/".*//' | sort -u
 }
@@ -114,24 +166,39 @@ show_status() {
     profiles=$(list_profiles)
     if [ -z "$profiles" ]; then
         echo ""
-        echo -e "  ${DIM}No profiles yet. Run:${NC} ${BOLD}claude-switch setup${NC}"
+        if [ "$(get_mode)" = "isolated" ]; then
+            echo -e "  ${DIM}No profiles yet. Create one:${NC} ${BOLD}claude-switch <name>${NC}"
+            echo -e "  ${DIM}then launch it with your shortcut to log in.${NC}"
+        else
+            echo -e "  ${DIM}No profiles yet. Run:${NC} ${BOLD}claude-switch setup${NC}"
+        fi
         echo ""
         return
     fi
 
-    local alias_name
+    local alias_name mode
     alias_name=$(get_config "alias" "c")
+    mode=$(get_mode)
 
     echo ""
-    echo -e "  ${DIM}Profiles${NC}"
+    if [ "$mode" = "isolated" ]; then
+        echo -e "  ${DIM}Profiles${NC} ${DIM}(isolated)${NC}"
+    else
+        echo -e "  ${DIM}Profiles${NC}"
+    fi
     echo -e "  ${DIM}────────────────────────────────────${NC}"
 
     while IFS= read -r profile; do
         [[ -z "$profile" ]] && continue
-        local info marker color sub_color
-        info=$(get_token_info "${PROFILE_PREFIX}${profile}" 2>/dev/null) || info="error|?|?|"
-
-        IFS='|' read -r status sub time_str email <<< "$info"
+        local info marker color sub_color status sub time_str email
+        if [ "$mode" = "isolated" ]; then
+            info=$(isolated_info "$(profile_dir "$profile")") || info="error||"
+            IFS='|' read -r status sub email <<< "$info"
+            time_str="$status"
+        else
+            info=$(get_token_info "${PROFILE_PREFIX}${profile}" 2>/dev/null) || info="error|?|?|"
+            IFS='|' read -r status sub time_str email <<< "$info"
+        fi
 
         if [ "$profile" = "$active" ]; then
             marker="${GREEN}●${NC}"
@@ -141,6 +208,7 @@ show_status() {
 
         case "$status" in
             valid)   color="${GREEN}" ;;
+            ready)   color="${CYAN}" ;;
             expired) color="${YELLOW}" ;;
             *)       color="${RED}" ;;
         esac
@@ -160,6 +228,23 @@ show_status() {
         printf "\n"
     done <<< "$profiles"
 
+    # Warn if an env var overrides the swapped profile. Claude Code's auth
+    # precedence puts these ahead of the subscription OAuth we swap in, so a
+    # set key means the active profile above is NOT what Claude actually uses.
+    local override=""
+    if [ -n "$ANTHROPIC_API_KEY" ]; then
+        override="ANTHROPIC_API_KEY"
+    elif [ -n "$ANTHROPIC_AUTH_TOKEN" ]; then
+        override="ANTHROPIC_AUTH_TOKEN"
+    elif [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+        override="CLAUDE_CODE_OAUTH_TOKEN"
+    fi
+    if [ -n "$override" ]; then
+        echo ""
+        echo -e "  ${YELLOW}!${NC} ${BOLD}${override}${NC} is set — it overrides the active profile."
+        echo -e "    ${DIM}Claude Code will use that, not the swapped credentials. unset it to switch.${NC}"
+    fi
+
     echo ""
     echo -e "  ${DIM}Switch: ${NC}${BOLD}${alias_name} <profile>${NC}${DIM}  |  Status: ${NC}${BOLD}${alias_name} status${NC}"
     echo ""
@@ -169,6 +254,23 @@ do_setup() {
     local alias_name
     local -a pending_names=()
     local -a pending_creds=()
+
+    if [ "$(get_mode)" = "isolated" ]; then
+        echo ""
+        echo -e "  ${BOLD}claude-switch${NC} ${DIM}setup (isolated mode)${NC}"
+        echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "  In isolated mode each profile is its own config dir, so there's"
+        echo -e "  nothing to capture up front. To add an account:"
+        echo ""
+        echo -e "    ${BOLD}claude-switch <name>${NC}   ${DIM}create the profile${NC}"
+        echo -e "    ${BOLD}$(get_config alias c) <name>${NC}              ${DIM}launch it — Claude prompts you to log in${NC}"
+        echo ""
+        echo -e "  ${DIM}Repeat for each account. Switch back to keychain mode with:${NC}"
+        echo -e "  ${BOLD}claude-switch mode keychain${NC}"
+        echo ""
+        return 0
+    fi
 
     trap 'printf "${NC}\n\n  ${DIM}Setup cancelled. Nothing was saved.${NC}\n\n"; return 1' INT
 
@@ -307,7 +409,7 @@ do_setup() {
 
     # Set the last added profile as active
     if [ -n "$last_name" ]; then
-        echo "$last_name" > "$ACTIVE_FILE"
+        set_active_profile "$last_name"
     fi
 
     echo -e "     ${GREEN}✓${NC} Shortcut set to ${BOLD}${alias_name}${NC}"
@@ -339,7 +441,7 @@ do_setup() {
 
 usage() {
     echo ""
-    echo -e "  ${BOLD}claude-switch${NC} ${DIM}v0.1.0${NC}"
+    echo -e "  ${BOLD}claude-switch${NC} ${DIM}v${VERSION}${NC}"
     echo ""
     echo -e "  ${BOLD}Usage:${NC} claude-switch ${CYAN}<command>${NC} ${DIM}[args]${NC}"
     echo ""
@@ -351,6 +453,7 @@ usage() {
     echo -e "  ${CYAN}remove${NC} ${DIM}<name>${NC}      Remove a saved profile"
     echo -e "  ${CYAN}refresh${NC}            Refresh the active profile's token"
     echo -e "  ${CYAN}alias${NC} ${DIM}[name]${NC}       Show or change the shell shortcut"
+    echo -e "  ${CYAN}mode${NC} ${DIM}[name]${NC}        Show or set storage mode ${DIM}(keychain|isolated)${NC}"
     echo ""
     exit 0
 }
@@ -386,7 +489,7 @@ case "$CMD" in
 
         security add-generic-password -U -s "${PROFILE_PREFIX}${SAVE_AS}" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS" 2>/dev/null || \
         security add-generic-password    -s "${PROFILE_PREFIX}${SAVE_AS}" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS"
-        echo "$SAVE_AS" > "$ACTIVE_FILE"
+        set_active_profile "$SAVE_AS"
         echo -e "${GREEN}✓${NC} Saved current credentials as ${BOLD}${SAVE_AS}${NC}"
         ;;
 
@@ -400,9 +503,19 @@ case "$CMD" in
             echo -e "${RED}✗${NC} Usage: claude-switch remove ${DIM}<profile-name>${NC}"
             exit 1
         fi
-        security delete-generic-password -s "${PROFILE_PREFIX}${PROFILE}" -a "$KEYCHAIN_ACCOUNT" 2>/dev/null && \
-            echo -e "${GREEN}✓${NC} Removed profile ${BOLD}${PROFILE}${NC}" || \
-            echo -e "${RED}✗${NC} Profile '${PROFILE}' not found."
+        if [ "$(get_mode)" = "isolated" ]; then
+            DIR="$(profile_dir "$PROFILE")"
+            if [ -d "$DIR" ]; then
+                rm -rf "$DIR"
+                echo -e "${GREEN}✓${NC} Removed profile ${BOLD}${PROFILE}${NC}"
+            else
+                echo -e "${RED}✗${NC} Profile '${PROFILE}' not found."
+            fi
+        else
+            security delete-generic-password -s "${PROFILE_PREFIX}${PROFILE}" -a "$KEYCHAIN_ACCOUNT" 2>/dev/null && \
+                echo -e "${GREEN}✓${NC} Removed profile ${BOLD}${PROFILE}${NC}" || \
+                echo -e "${RED}✗${NC} Profile '${PROFILE}' not found."
+        fi
         ;;
 
     refresh)
@@ -411,10 +524,64 @@ case "$CMD" in
             echo -e "${RED}✗${NC} No active profile."
             exit 1
         fi
+        if [ "$(get_mode)" = "isolated" ]; then
+            # Isolated profiles keep their own refresh token and renew in place
+            # on next use — there's nothing to copy. Nudge a renewal instead.
+            CLAUDE_CONFIG_DIR="$(profile_dir "$ACTIVE")" claude auth status >/dev/null 2>&1 || true
+            echo -e "${GREEN}✓${NC} ${BOLD}${ACTIVE}${NC} renews automatically on use."
+            show_status
+            exit 0
+        fi
         echo -e "${DIM}Refreshing ${ACTIVE}...${NC}"
         do_refresh "$ACTIVE"
         echo -e "${GREEN}✓${NC} Token refreshed for ${BOLD}${ACTIVE}${NC}"
         show_status
+        ;;
+
+    mode)
+        NEW_MODE="${2:-}"
+        if [ -z "$NEW_MODE" ]; then
+            echo -e "Current mode: ${BOLD}$(get_mode)${NC}"
+            echo ""
+            echo -e "  ${BOLD}keychain${NC}  ${DIM}swap one shared login in the macOS Keychain (default)${NC}"
+            echo -e "  ${BOLD}isolated${NC}  ${DIM}each profile is its own CLAUDE_CONFIG_DIR — separate${NC}"
+            echo -e "            ${DIM}login & refresh token, can run side by side${NC}"
+            echo ""
+            echo -e "  ${DIM}Change it: claude-switch mode <keychain|isolated>${NC}"
+        else
+            case "$NEW_MODE" in
+                keychain|isolated)
+                    set_config "mode" "$NEW_MODE"
+                    echo -e "${GREEN}✓${NC} Mode set to ${BOLD}${NEW_MODE}${NC}"
+                    if [ "$NEW_MODE" = "isolated" ]; then
+                        echo -e "${DIM}Profiles from keychain mode aren't carried over — switch to a${NC}"
+                        echo -e "${DIM}profile name and Claude will prompt you to log in for it.${NC}"
+                    fi
+                    echo -e "${DIM}Restart your shell or: source ~/.zshrc${NC}"
+                    ;;
+                *)
+                    echo -e "${RED}✗${NC} Unknown mode '${NEW_MODE}'. Use ${BOLD}keychain${NC} or ${BOLD}isolated${NC}."
+                    exit 1
+                    ;;
+            esac
+        fi
+        ;;
+
+    _mode)
+        # Internal: print the active storage mode for the shell wrapper.
+        get_mode
+        ;;
+
+    _dirfor)
+        # Internal: used by the shell wrapper in isolated mode. Ensure the
+        # profile's config dir exists, record it active, and print its path so
+        # the wrapper can export CLAUDE_CONFIG_DIR before launching claude.
+        PROFILE="${2:-}"
+        [ -z "$PROFILE" ] && exit 1
+        DIR="$(profile_dir "$PROFILE")"
+        mkdir -p "$DIR"
+        set_active_profile "$PROFILE"
+        echo "$DIR"
         ;;
 
     alias)
@@ -437,6 +604,21 @@ case "$CMD" in
     *)
         # Treat as profile name to switch to
         PROFILE="$CMD"
+
+        if [ "$(get_mode)" = "isolated" ]; then
+            # Switching == pointing CLAUDE_CONFIG_DIR at the profile's dir. The
+            # shell wrapper does the export; when invoked directly we can only
+            # record the choice and show the user the line to run.
+            DIR="$(profile_dir "$PROFILE")"
+            mkdir -p "$DIR"
+            set_active_profile "$PROFILE"
+            echo -e "${GREEN}●${NC} Active profile set to ${BOLD}${PROFILE}${NC} ${DIM}(isolated)${NC}"
+            echo -e "  ${DIM}This shell still uses the old account. To switch here, run:${NC}"
+            echo -e "  ${BOLD}export CLAUDE_CONFIG_DIR=$DIR${NC}"
+            echo -e "  ${DIM}or use your shortcut (${BOLD}$(get_config alias c) ${PROFILE}${NC}${DIM}) which does this for you.${NC}"
+            exit 0
+        fi
+
         SOURCE="${PROFILE_PREFIX}${PROFILE}"
 
         if ! security find-generic-password -s "$SOURCE" -w >/dev/null 2>&1; then
@@ -468,12 +650,12 @@ case "$CMD" in
         CREDS=$(security find-generic-password -s "$SOURCE" -w)
         security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS" 2>/dev/null || \
         security add-generic-password    -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$CREDS"
-        echo "$PROFILE" > "$ACTIVE_FILE"
+        set_active_profile "$PROFILE"
 
         # Refresh if expired
         local_info=$(get_token_info "$KEYCHAIN_SERVICE" 2>/dev/null) || local_info=""
         local_status=$(echo "$local_info" | cut -d'|' -f1)
-        if [ "$local_status" = "expired" ]; then
+        if [ "$local_status" = "expired" ] || [ "$local_status" = "ready" ]; then
             echo -e "${DIM}  Token expired, refreshing...${NC}"
             do_refresh "$PROFILE"
         fi

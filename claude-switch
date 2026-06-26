@@ -4,7 +4,7 @@
 
 set -e
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 KEYCHAIN_SERVICE="Claude Code-credentials"
 KEYCHAIN_ACCOUNT="$(whoami)"
 ACTIVE_FILE="$HOME/.claude/.active-profile"

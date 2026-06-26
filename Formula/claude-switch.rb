@@ -1,8 +1,8 @@
 class ClaudeSwitch < Formula
   desc "Fast profile switcher for Claude Code — swap accounts in under a second"
   homepage "https://github.com/Mamdouh66/claude-switch"
-  url "https://github.com/Mamdouh66/claude-switch/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "92ff1d71de6c02ae4975cc9a00d1f9ac11406250c7d81f75a631b030b675fc5e"
+  url "https://github.com/Mamdouh66/claude-switch/archive/refs/tags/v0.3.0.tar.gz"
+  sha256 "0047a7e250e0052527a1c7b7a51f18b1e8b0d4378abc584ad53e53514e0c9414"
   license "MIT"
 
   depends_on :macos
